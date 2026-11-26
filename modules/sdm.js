@@ -205,7 +205,15 @@ function maxOf(a) { return a.reduce(function (m, v) { return v > m ? v : m; }, -
 function sdOf(a) { var m = MAS.meanOf(a); return a.length > 1 ? Math.sqrt(a.reduce(function (s, x) { return s + (x - m) * (x - m); }, 0) / (a.length - 1)) : NaN; }
 function fracGE(a, t) { return a.length ? a.filter(function (v) { return v >= t; }).length / a.length : NaN; }
 function tssAt(pos, neg, t) { return fracGE(pos, t) - fracGE(neg, t); }
-function bestTss(pos, neg) { var b = {thr: NaN, tss: NaN}; MAS.uniq(pos).forEach(function (t) { var s = tssAt(pos, neg, t); if (!(s <= b.tss)) b = {thr: t, tss: s}; }); return b; }
+// sorted arrays + binary search keep the evaluation fast in the browser (thousands of background predictions)
+function sortAsc(a) { return a.slice().sort(function (x, y) { return x - y; }); }
+function firstGE(s, t) { var lo = 0, hi = s.length; while (lo < hi) { var m = (lo + hi) >> 1; if (s[m] >= t) hi = m; else lo = m + 1; } return lo; }
+function firstGT(s, t) { var lo = 0, hi = s.length; while (lo < hi) { var m = (lo + hi) >> 1; if (s[m] > t) hi = m; else lo = m + 1; } return lo; }
+function bestTss(pos, neg) {
+  var sp = sortAsc(pos), sn = sortAsc(neg), b = {thr: NaN, tss: NaN};
+  MAS.uniq(sp).forEach(function (t) { var s = (sp.length - firstGE(sp, t)) / sp.length - (sn.length - firstGE(sn, t)) / sn.length; if (!(s <= b.tss)) b = {thr: t, tss: s}; });
+  return b;
+}
 function ranks(a) {
   var o = a.map(function (v, i) { return [v, i]; }).sort(function (p, q) { return p[0] - q[0]; }), r = [];
   for (var i = 0; i < o.length;) { var j = i; while (j + 1 < o.length && o[j + 1][0] === o[i][0]) j++; for (var k = i; k <= j; k++) r[o[k][1]] = (i + j) / 2 + 1; i = j + 1; }
@@ -214,9 +222,10 @@ function ranks(a) {
 function boyce(pos, neg) {   // ecospat defaults: window = 1/10 of the range, 101 positions, repeated P/E ratios removed
   var lo = Math.min(minOf(pos), minOf(neg)), hi = Math.max(maxOf(pos), maxOf(neg)), w = (hi - lo) / 10, x = [], y = [];
   if (!(w > 0) || pos.length < 2 || !neg.length) return NaN;
+  var sp = sortAsc(pos), sn = sortAsc(neg);
   for (var i = 0; i <= 100; i++) {
-    var a = lo + (hi - lo - w) * i / 100, b = a + w, inW = function (v) { return v >= a && v <= b; };
-    var e = neg.filter(inW).length / neg.length, r = e > 0 ? pos.filter(inW).length / pos.length / e : NaN;
+    var a = lo + (hi - lo - w) * i / 100, b = a + w;
+    var e = (firstGT(sn, b) - firstGE(sn, a)) / sn.length, r = e > 0 ? (firstGT(sp, b) - firstGE(sp, a)) / sp.length / e : NaN;
     if (isFinite(r) && r !== y[y.length - 1]) { x.push(a + w / 2); y.push(r); }
   }
   return x.length > 2 ? corr(ranks(x), ranks(y)) : NaN;
@@ -431,18 +440,35 @@ function varCap(R, c, nP) { return Math.max(2, Math.floor(nP / 5)); }
    // Guidelines 12.1.12.2: <= 1 variable per 5 records (not binding for Maxent)
 // practical range of the empirical semivariogram: first lag where it reaches 95% of the sample variance (Valavi et al. 2019 use the
 // median range of the covariates as the block size); pairs are binned once and reused for every variable
-function vgPairs(xy) {
-  var n = xy.length, cl = Math.cos(MAS.meanOf(xy.map(function (p) { return p[1]; })) * Math.PI / 180), P = [], mx = 0, i, j;
-  for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) { var h = Math.sqrt(Math.pow((xy[i][0] - xy[j][0]) * 111.32 * cl, 2) + Math.pow((xy[i][1] - xy[j][1]) * 110.57, 2)); P.push([i, j, h]); if (h > mx) mx = h; }
-  return {P: P, lag: mx / 2 / 15};
+var VG_N = 300;   // background points used for the semivariograms (300 points = 44,850 pairs)
+function vgPairs(xy) {   // pairs and their distance bins, kept in typed arrays (light on the browser)
+  var n = xy.length, cl = Math.cos(MAS.meanOf(xy.map(function (p) { return p[1]; })) * Math.PI / 180), np = n * (n - 1) / 2;
+  var I = new Int32Array(np), J = new Int32Array(np), D = new Float64Array(np), mx = 0, i, j, q = 0;
+  for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) {
+    var dx = (xy[i][0] - xy[j][0]) * 111.32 * cl, dy = (xy[i][1] - xy[j][1]) * 110.57, h = Math.sqrt(dx * dx + dy * dy);
+    I[q] = i; J[q] = j; D[q] = h; q++; if (h > mx) mx = h;
+  }
+  var lag = mx / 2 / 15, B = new Uint8Array(np);
+  for (q = 0; q < np; q++) B[q] = lag > 0 ? Math.min(15, Math.floor(D[q] / lag)) : 15;
+  return {I: I, J: J, B: B, n: np, lag: lag};
 }
 function vgRange(G, z) {
-  var m = MAS.meanOf(z), s2 = z.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0) / (z.length - 1), sum = [], n = [], b;
-  if (!(s2 > 0)) return NaN;
+  var m = MAS.meanOf(z), s2 = z.reduce(function (a, v) { return a + (v - m) * (v - m); }, 0) / (z.length - 1), sum = [], n = [], b, q;
+  if (!(s2 > 0) || !(G.lag > 0)) return NaN;
   for (b = 0; b < 15; b++) { sum.push(0); n.push(0); }
-  G.P.forEach(function (q) { b = Math.floor(q[2] / G.lag); if (b < 15) { sum[b] += (z[q[0]] - z[q[1]]) * (z[q[0]] - z[q[1]]) / 2; n[b]++; } });
+  for (q = 0; q < G.n; q++) { b = G.B[q]; if (b < 15) { var d = z[G.I[q]] - z[G.J[q]]; sum[b] += d * d / 2; n[b]++; } }
   for (b = 0; b < 15; b++) if (n[b] && sum[b] / n[b] >= 0.95 * s2) return (b + 0.5) * G.lag;
   return 15 * G.lag;
+}
+// runs fn over the items one per browser turn, so the page stays responsive during long client-side work
+function stepsLater(R, items, fn, done) {
+  var i = 0;
+  (function next() {
+    if (MAS.stale(R)) return;
+    if (i >= items.length) { done(); return; }
+    fn(items[i], i); i++;
+    ui.util.setTimeout(next, 0);
+  })();
 }
 function suggestBlock(R, V, set) {
   var c = SC(R), co = thinPoints(MAS.uniqueCoords(R.recs), c.thinKm), km = quantile(set.map(function (k) { return V.range[k]; }), 0.5), k = Math.max(2, Math.round(c.k));
@@ -466,22 +492,25 @@ function screenVars(R, out, done) {
     if (MAS.stale(R)) return;
     if (err || !res) { out.clear(); out.add(ui.Label('Screening failed: ' + err, {color: '#b30000', fontSize: '12px'})); return; }
     var V = {nP: (res['p_bio01'] || []).length, nB: (res['b_bio01'] || []).length, auc: {}, cor: {}, pm: {}, bm: {}, prng: {}, brng: {}, range: {}};
-    var n6 = Math.min(600, (res.bx || []).length), G = vgPairs((res.bx || []).slice(0, n6).map(function (x, i) { return [x, res.by[i]]; }));
-    MAS.BIO_KEYS.forEach(function (k) {
+    var nv = Math.min(VG_N, (res.bx || []).length), G = vgPairs((res.bx || []).slice(0, nv).map(function (x, i) { return [x, res.by[i]]; }));
+    var lab = ui.Label('', MAS.S.small); out.clear(); out.add(lab);
+    stepsLater(R, MAS.BIO_KEYS, function (k, i) {   // one variable per step: discrimination, correlations with the previous ones, autocorrelation range
+      lab.setValue('Screening ' + k + ' (' + (i + 1) + ' of ' + MAS.BIO_KEYS.length + ')...');
       var p = (res['p_' + k] || []).filter(isFinite), b = (res['b_' + k] || []).filter(isFinite), a = aucOf(p.map(function () { return 1; }).concat(b.map(function () { return 0; })), p.concat(b));
       V.auc[k] = isFinite(a) ? Math.max(a, 1 - a) : NaN;   // direction-free discrimination of presences from the background
       V.pm[k] = MAS.meanOf(p); V.bm[k] = MAS.meanOf(b);
       V.prng[k] = p.length ? [Math.min.apply(null, p), Math.max.apply(null, p)] : [NaN, NaN];
       V.brng[k] = b.length ? [quantile(b, 0.05), quantile(b, 0.95)] : [NaN, NaN];
-      V.cor[k] = {};
-      V.range[k] = n6 > 30 ? vgRange(G, (res['b_' + k] || []).slice(0, n6)) : NaN;
-    });
-    MAS.BIO_KEYS.forEach(function (a) { MAS.BIO_KEYS.forEach(function (b) { if (a <= b) { var r = a === b ? 1 : corr(res['b_' + a] || [], res['b_' + b] || []); V.cor[a][b] = r; V.cor[b][a] = r; } }); });
+      V.cor[k] = {}; V.cor[k][k] = 1;
+      MAS.BIO_KEYS.slice(0, i).forEach(function (o) { var r = corr(res['b_' + k] || [], res['b_' + o] || []); V.cor[k][o] = r; V.cor[o][k] = r; });
+      V.range[k] = nv > 30 ? vgRange(G, (res['b_' + k] || []).slice(0, nv)) : NaN;
+    }, function () {
     var cap = varCap(R, c, co.length), order = MAS.BIO_KEYS.filter(function (k) { return isFinite(V.auc[k]); }).sort(function (a, b) { return V.auc[b] - V.auc[a]; }), sug = [];
     order.forEach(function (k) { if (sug.length < cap && sug.every(function (s) { return Math.abs(V.cor[k][s]) < 0.7; })) sug.push(k); });
     V.order = order; V.sug = sug; V.cap = cap; V.nThin = co.length;
     R.SDMscreen = V; V.block = suggestBlock(R, V, sug);
     done();
+    });
   });
 }
 function screenPanel(R) {
@@ -637,3 +666,4 @@ function renderSdmResults(R, out) {
   out.add(ui.Button({label: 'Supplementary Information for Bioclimate Models (Word)', onClick: function () { MAS.docDownload(dp, MAS.safeName(R.cfg.species) + '_bioclimate_SI.doc', MAS.bioclimateDoc(R)); }}));
   out.add(dp);
 }
+
