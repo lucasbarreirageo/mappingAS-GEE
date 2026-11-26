@@ -441,15 +441,15 @@ function varCap(R, c, nP) { return Math.max(2, Math.floor(nP / 5)); }
 // practical range of the empirical semivariogram: first lag where it reaches 95% of the sample variance (Valavi et al. 2019 use the
 // median range of the covariates as the block size); pairs are binned once and reused for every variable
 var VG_N = 300;   // background points used for the semivariograms (300 points = 44,850 pairs)
-function vgPairs(xy) {   // pairs and their distance bins, kept in typed arrays (light on the browser)
+function vgPairs(xy) {   // pairs and their distance bins in flat arrays (the Code Editor has no typed arrays)
   var n = xy.length, cl = Math.cos(MAS.meanOf(xy.map(function (p) { return p[1]; })) * Math.PI / 180), np = n * (n - 1) / 2;
-  var I = new Int32Array(np), J = new Int32Array(np), D = new Float64Array(np), mx = 0, i, j, q = 0;
+  var I = [], J = [], D = [], mx = 0, i, j, q;
   for (i = 0; i < n; i++) for (j = i + 1; j < n; j++) {
     var dx = (xy[i][0] - xy[j][0]) * 111.32 * cl, dy = (xy[i][1] - xy[j][1]) * 110.57, h = Math.sqrt(dx * dx + dy * dy);
-    I[q] = i; J[q] = j; D[q] = h; q++; if (h > mx) mx = h;
+    I.push(i); J.push(j); D.push(h); if (h > mx) mx = h;
   }
-  var lag = mx / 2 / 15, B = new Uint8Array(np);
-  for (q = 0; q < np; q++) B[q] = lag > 0 ? Math.min(15, Math.floor(D[q] / lag)) : 15;
+  var lag = mx / 2 / 15, B = [];
+  for (q = 0; q < np; q++) B.push(lag > 0 ? Math.min(15, Math.floor(D[q] / lag)) : 15);
   return {I: I, J: J, B: B, n: np, lag: lag};
 }
 function vgRange(G, z) {
@@ -666,4 +666,3 @@ function renderSdmResults(R, out) {
   out.add(ui.Button({label: 'Supplementary Information for Bioclimate Models (Word)', onClick: function () { MAS.docDownload(dp, MAS.safeName(R.cfg.species) + '_bioclimate_SI.doc', MAS.bioclimateDoc(R)); }}));
   out.add(dp);
 }
-
