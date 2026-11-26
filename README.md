@@ -69,15 +69,7 @@ To publish a tested version, copy the files to the public repository and replace
 `mappingAS` in the `require` lines of `app.js` (the modules contain no paths). The public repository must
 stay readable by everyone, otherwise other users and the App cannot load the modules.
 
-## Copying the files with git
 
-```
-git clone https://earthengine.googlesource.com/users/paleomapas/mappingAS-dev
-# copy app.js, README.md and the modules folder into the clone
-cd mappingAS-dev
-git add -A
-git commit -m "mappingAS GEE 2.0.0"
-git push origin master
 ```
 
 The first push asks for credentials: generate them at https://earthengine.googlesource.com/new-password.
